@@ -806,6 +806,7 @@ def main():
     podcast_title = payload.get('title', 'Podcast')
     language = payload.get('language', 'hi')
     callback_url = payload.get('callback_url', '')
+    row_id = payload.get('row_id', '')  # For matching in Google Sheet
     
     # Process
     clips = asyncio.run(process_podcast(podcast_url, podcast_title, language))
@@ -816,6 +817,7 @@ def main():
         callback_data = {
             "status": "success",
             "podcast_title": podcast_title,
+            "row_id": row_id,  # Include for Google Sheet matching
             "clips_count": len(clips),
             "clips": clips
         }
