@@ -281,12 +281,63 @@ def format_transcript_with_timestamps(whisper_result: Dict) -> str:
 
 
 async def find_viral_segments(transcript: str) -> List[Dict]:
-    """Use Groq LLaMA to find top 10 viral segments."""
+    """Use Groq LLaMA to find top 10 viral segments. Handles large transcripts by chunking."""
     print(f"[4/7] Analyzing for viral segments...")
+    
+    # Check transcript size - Groq has ~128K token limit, but safer to chunk at ~50K chars
+    MAX_CHUNK_CHARS = 40000
+    
+    if len(transcript) > MAX_CHUNK_CHARS:
+        print(f"  Transcript too large ({len(transcript)} chars), analyzing in chunks...")
+        return await find_viral_segments_chunked(transcript, MAX_CHUNK_CHARS)
+    
+    return await analyze_transcript_chunk(transcript)
+
+
+async def find_viral_segments_chunked(transcript: str, chunk_size: int) -> List[Dict]:
+    """Split transcript into chunks and find best segments from each."""
+    lines = transcript.split('\n')
+    chunks = []
+    current_chunk = []
+    current_size = 0
+    
+    for line in lines:
+        if current_size + len(line) > chunk_size and current_chunk:
+            chunks.append('\n'.join(current_chunk))
+            current_chunk = []
+            current_size = 0
+        current_chunk.append(line)
+        current_size += len(line) + 1
+    
+    if current_chunk:
+        chunks.append('\n'.join(current_chunk))
+    
+    print(f"  Split into {len(chunks)} chunks")
+    
+    all_segments = []
+    
+    for i, chunk in enumerate(chunks):
+        print(f"  Analyzing chunk {i+1}/{len(chunks)}...")
+        try:
+            chunk_segments = await analyze_transcript_chunk(chunk)
+            all_segments.extend(chunk_segments)
+        except Exception as e:
+            print(f"    Chunk {i+1} failed: {e}")
+            continue
+    
+    # Sort by viral score and return top 10
+    all_segments.sort(key=lambda x: x.get('viral_score', 0), reverse=True)
+    print(f"  Found {len(all_segments)} total segments, selecting top 10")
+    
+    return all_segments[:NUM_CLIPS]
+
+
+async def analyze_transcript_chunk(transcript: str) -> List[Dict]:
+    """Analyze a single transcript chunk for viral segments."""
     
     prompt = f"""You are a viral content expert specializing in podcast clips for TikTok/Reels/Shorts.
 
-Analyze this podcast transcript and find the TOP 10 most viral-worthy segments.
+Analyze this podcast transcript and find the TOP 5 most viral-worthy segments.
 
 TRANSCRIPT (with timestamps):
 {transcript}
@@ -325,7 +376,7 @@ RULES:
 - Leave 2-second padding at start/end
 - Avoid segments that need context from earlier
 - Order by viral_score descending (highest first)
-- Return exactly 10 segments
+- Return exactly 5 segments
 
 Return ONLY the JSON, no other text."""
 
@@ -345,7 +396,7 @@ Return ONLY the JSON, no other text."""
         "response_format": {"type": "json_object"}
     }
     
-    response = requests.post(url, headers=headers, json=data)
+    response = requests.post(url, headers=headers, json=data, timeout=120)
     response.raise_for_status()
     
     result = response.json()
@@ -354,8 +405,7 @@ Return ONLY the JSON, no other text."""
     parsed = json.loads(content)
     segments = parsed.get('segments', [])
     
-    print(f"  Found: {len(segments)} viral segments")
-    return segments[:NUM_CLIPS]
+    return segments
 
 
 def cut_clip(video_path: str, start: float, duration: float, output_path: str) -> str:
