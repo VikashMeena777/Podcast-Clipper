@@ -1,0 +1,52 @@
+name: Podcast Clipper
+on:
+  repository_dispatch:
+    types: [clip_podcast]
+
+jobs:
+  clip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install yt-dlp requests
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      
+      - name: Setup rclone
+        run: |
+          curl -O https://downloads.rclone.org/rclone-current-linux-amd64.deb
+          sudo dpkg -i rclone-current-linux-amd64.deb
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+      
+      - name: Process podcast
+        id: process
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          python clip_podcast.py --payload '${{ toJson(github.event.client_payload) }}'
+      
+      - name: Send callback on success
+        if: success()
+        run: |
+          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"status": "success", "clips_count": "${{ steps.process.outputs.clips_count }}"}'
+      
+      - name: Send callback on failure
+        if: failure()
+        run: |
+          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"status": "error", "error": "Processing failed"}'
