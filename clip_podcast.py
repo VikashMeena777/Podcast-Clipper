@@ -45,14 +45,30 @@ def download_youtube(url: str, output_path: str) -> str:
     
     cmd = [
         'yt-dlp',
+        '--js-runtimes', 'deno',
         '-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
         '--merge-output-format', 'mp4',
         '-o', output_path,
-        url
     ]
+    
+    # Add cookies if available
+    cookies_file = os.environ.get('YOUTUBE_COOKIES_FILE', '')
+    if cookies_file and os.path.exists(cookies_file):
+        cmd.extend(['--cookies', cookies_file])
+        print(f"  Using cookies file: {cookies_file}")
+    
+    # Add user agent to look like a real browser
+    cmd.extend([
+        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        '--sleep-interval', '1',
+        '--max-sleep-interval', '3',
+    ])
+    
+    cmd.append(url)
     
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
+        print(f"  yt-dlp stderr: {result.stderr}")
         raise RuntimeError(f"yt-dlp failed: {result.stderr}")
     
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
