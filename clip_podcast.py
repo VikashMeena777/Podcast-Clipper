@@ -101,8 +101,17 @@ def extract_audio(video_path: str, output_path: str) -> str:
 
 
 async def transcribe_audio(audio_path: str, language: str = "hi") -> Dict:
-    """Transcribe audio using Groq Whisper API (FREE)."""
+    """Transcribe audio using Groq Whisper API (FREE) with retry and chunking."""
     print(f"[3/7] Transcribing with Whisper (language: {language})...")
+    
+    # Check file size - Groq has 25MB limit
+    file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+    print(f"  Audio file size: {file_size_mb:.1f} MB")
+    
+    # If file is too large, we need to split it
+    if file_size_mb > 24:
+        print(f"  Audio too large, splitting into chunks...")
+        return await transcribe_audio_chunked(audio_path, language)
     
     url = f"{GROQ_API_URL}/audio/transcriptions"
     
@@ -110,24 +119,100 @@ async def transcribe_audio(audio_path: str, language: str = "hi") -> Dict:
         "Authorization": f"Bearer {GROQ_API_KEY}"
     }
     
-    with open(audio_path, 'rb') as f:
-        files = {
-            'file': (os.path.basename(audio_path), f, 'audio/mp3')
-        }
-        data = {
-            'model': WHISPER_MODEL,
-            'language': language,
-            'response_format': 'verbose_json',
-            'timestamp_granularities[]': 'segment'
-        }
-        
-        response = requests.post(url, headers=headers, files=files, data=data)
-        response.raise_for_status()
-        
-        result = response.json()
-        
-    print(f"  Transcribed: {len(result.get('segments', []))} segments")
-    return result
+    # Retry logic with exponential backoff
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with open(audio_path, 'rb') as f:
+                files = {
+                    'file': (os.path.basename(audio_path), f, 'audio/mp3')
+                }
+                data = {
+                    'model': WHISPER_MODEL,
+                    'language': language,
+                    'response_format': 'verbose_json',
+                    'timestamp_granularities[]': 'segment'
+                }
+                
+                response = requests.post(url, headers=headers, files=files, data=data, timeout=300)
+                
+                if response.status_code == 500:
+                    print(f"  Attempt {attempt + 1}/{max_retries}: Server error, retrying...")
+                    import time
+                    time.sleep(5 * (attempt + 1))  # Exponential backoff
+                    continue
+                    
+                response.raise_for_status()
+                result = response.json()
+                
+            print(f"  Transcribed: {len(result.get('segments', []))} segments")
+            return result
+            
+        except requests.exceptions.HTTPError as e:
+            if attempt < max_retries - 1 and "500" in str(e):
+                print(f"  Retry {attempt + 1}/{max_retries} after error: {e}")
+                import time
+                time.sleep(5 * (attempt + 1))
+            else:
+                raise
+    
+    raise RuntimeError("Transcription failed after all retries")
+
+
+async def transcribe_audio_chunked(audio_path: str, language: str = "hi") -> Dict:
+    """Split audio and transcribe in chunks for long podcasts."""
+    import time
+    
+    # Get audio duration
+    cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
+           '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    total_duration = float(result.stdout.strip())
+    
+    # Split into ~10 minute chunks (fits under 25MB usually)
+    chunk_duration = 600  # 10 minutes
+    num_chunks = int(total_duration / chunk_duration) + 1
+    
+    print(f"  Total duration: {total_duration/60:.1f} min, splitting into {num_chunks} chunks")
+    
+    all_segments = []
+    
+    with tempfile.TemporaryDirectory() as chunk_dir:
+        for i in range(num_chunks):
+            start_time = i * chunk_duration
+            chunk_path = os.path.join(chunk_dir, f"chunk_{i:02d}.mp3")
+            
+            # Extract chunk
+            cmd = [
+                'ffmpeg', '-y', '-ss', str(start_time),
+                '-i', audio_path, '-t', str(chunk_duration),
+                '-acodec', 'mp3', '-ar', '16000', '-ac', '1',
+                chunk_path
+            ]
+            subprocess.run(cmd, capture_output=True, text=True)
+            
+            if not os.path.exists(chunk_path):
+                continue
+                
+            print(f"  Transcribing chunk {i+1}/{num_chunks}...")
+            
+            # Transcribe chunk (recursive call with smaller file)
+            chunk_result = await transcribe_audio(chunk_path, language)
+            
+            # Adjust timestamps and add to results
+            for segment in chunk_result.get('segments', []):
+                segment['start'] += start_time
+                segment['end'] += start_time
+                all_segments.append(segment)
+            
+            # Rate limit - wait between chunks
+            if i < num_chunks - 1:
+                time.sleep(2)
+    
+    return {
+        'text': ' '.join(s.get('text', '') for s in all_segments),
+        'segments': all_segments
+    }
 
 
 def format_transcript_with_timestamps(whisper_result: Dict) -> str:
