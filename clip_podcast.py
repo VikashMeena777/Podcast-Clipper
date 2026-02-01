@@ -447,9 +447,14 @@ def generate_ass_subtitles(segments: List[Dict], clip_start: float, clip_duratio
     
     # Use Noto Sans for Hindi/Hinglish support
     font_name = "Noto Sans Devanagari"
-    font_size = 72  # Larger font for mobile viewing
+    font_size = 100  # Very large font for mobile reels
     
-    # ASS header with larger font, thicker outline, centered at bottom
+    # ASS Style parameters:
+    # Alignment: 5 = center-middle of screen
+    # MarginV: 600 = position in lower-middle area
+    # Outline: 6 = thick black outline
+    # Shadow: 4 = drop shadow for depth
+    
     ass_content = f"""[Script Info]
 Title: Podcast Clip Subtitles
 ScriptType: v4.00+
@@ -459,7 +464,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,3,2,80,80,120,1
+Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,4,5,50,50,400,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
