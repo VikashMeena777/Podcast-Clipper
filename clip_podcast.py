@@ -101,14 +101,66 @@ def extract_audio(video_path: str, output_path: str) -> str:
 
 
 async def transcribe_audio(audio_path: str, language: str = "hi") -> Dict:
-    """Transcribe audio using Groq Whisper API (FREE) with retry and chunking."""
+    """Transcribe audio - tries local Whisper first, then Groq API."""
     print(f"[3/7] Transcribing with Whisper (language: {language})...")
+    
+    # Try local faster-whisper first (FREE, no limits!)
+    try:
+        return await transcribe_local_whisper(audio_path, language)
+    except Exception as e:
+        print(f"  Local Whisper failed: {e}")
+        print(f"  Falling back to Groq API...")
+        return await transcribe_groq_api(audio_path, language)
+
+
+async def transcribe_local_whisper(audio_path: str, language: str = "hi") -> Dict:
+    """Transcribe using local faster-whisper (FREE, no limits!)"""
+    print(f"  Using local faster-whisper (FREE)...")
+    
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        raise RuntimeError("faster-whisper not installed")
+    
+    # Use small model for speed on GitHub Actions (no GPU)
+    model = WhisperModel("small", device="cpu", compute_type="int8")
+    
+    segments_list = []
+    full_text = []
+    
+    # Transcribe
+    segments, info = model.transcribe(
+        audio_path,
+        language=language,
+        beam_size=5,
+        word_timestamps=False
+    )
+    
+    for segment in segments:
+        segments_list.append({
+            'start': segment.start,
+            'end': segment.end,
+            'text': segment.text.strip()
+        })
+        full_text.append(segment.text.strip())
+    
+    print(f"  Transcribed: {len(segments_list)} segments (local)")
+    
+    return {
+        'text': ' '.join(full_text),
+        'segments': segments_list
+    }
+
+
+async def transcribe_groq_api(audio_path: str, language: str = "hi") -> Dict:
+    """Transcribe using Groq Whisper API (fallback)."""
+    print(f"  Using Groq Whisper API...")
     
     # Check file size - Groq has 25MB limit
     file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
     print(f"  Audio file size: {file_size_mb:.1f} MB")
     
-    # If file is too large, we need to split it
+    # If file is too large, split it
     if file_size_mb > 24:
         print(f"  Audio too large, splitting into chunks...")
         return await transcribe_audio_chunked(audio_path, language)
@@ -119,7 +171,7 @@ async def transcribe_audio(audio_path: str, language: str = "hi") -> Dict:
         "Authorization": f"Bearer {GROQ_API_KEY}"
     }
     
-    # Retry logic with exponential backoff
+    # Retry logic
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -136,27 +188,28 @@ async def transcribe_audio(audio_path: str, language: str = "hi") -> Dict:
                 
                 response = requests.post(url, headers=headers, files=files, data=data, timeout=300)
                 
-                if response.status_code == 500:
-                    print(f"  Attempt {attempt + 1}/{max_retries}: Server error, retrying...")
+                if response.status_code in [429, 500]:
+                    wait_time = 30 * (attempt + 1)
+                    print(f"  Error {response.status_code}, waiting {wait_time}s...")
                     import time
-                    time.sleep(5 * (attempt + 1))  # Exponential backoff
+                    time.sleep(wait_time)
                     continue
                     
                 response.raise_for_status()
                 result = response.json()
                 
-            print(f"  Transcribed: {len(result.get('segments', []))} segments")
+            print(f"  Transcribed: {len(result.get('segments', []))} segments (Groq)")
             return result
             
-        except requests.exceptions.HTTPError as e:
-            if attempt < max_retries - 1 and "500" in str(e):
-                print(f"  Retry {attempt + 1}/{max_retries} after error: {e}")
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"  Retry {attempt + 1}: {e}")
                 import time
-                time.sleep(5 * (attempt + 1))
+                time.sleep(10)
             else:
                 raise
     
-    raise RuntimeError("Transcription failed after all retries")
+    raise RuntimeError("Groq transcription failed")
 
 
 async def transcribe_audio_chunked(audio_path: str, language: str = "hi") -> Dict:
@@ -169,8 +222,8 @@ async def transcribe_audio_chunked(audio_path: str, language: str = "hi") -> Dic
     result = subprocess.run(cmd, capture_output=True, text=True)
     total_duration = float(result.stdout.strip())
     
-    # Split into ~10 minute chunks (fits under 25MB usually)
-    chunk_duration = 600  # 10 minutes
+    # Split into ~10 minute chunks
+    chunk_duration = 600
     num_chunks = int(total_duration / chunk_duration) + 1
     
     print(f"  Total duration: {total_duration/60:.1f} min, splitting into {num_chunks} chunks")
@@ -182,7 +235,6 @@ async def transcribe_audio_chunked(audio_path: str, language: str = "hi") -> Dic
             start_time = i * chunk_duration
             chunk_path = os.path.join(chunk_dir, f"chunk_{i:02d}.mp3")
             
-            # Extract chunk
             cmd = [
                 'ffmpeg', '-y', '-ss', str(start_time),
                 '-i', audio_path, '-t', str(chunk_duration),
@@ -196,16 +248,17 @@ async def transcribe_audio_chunked(audio_path: str, language: str = "hi") -> Dic
                 
             print(f"  Transcribing chunk {i+1}/{num_chunks}...")
             
-            # Transcribe chunk (recursive call with smaller file)
-            chunk_result = await transcribe_audio(chunk_path, language)
+            # Use local whisper for chunks
+            try:
+                chunk_result = await transcribe_local_whisper(chunk_path, language)
+            except:
+                chunk_result = await transcribe_groq_api(chunk_path, language)
             
-            # Adjust timestamps and add to results
             for segment in chunk_result.get('segments', []):
                 segment['start'] += start_time
                 segment['end'] += start_time
                 all_segments.append(segment)
             
-            # Rate limit - wait between chunks
             if i < num_chunks - 1:
                 time.sleep(2)
     
