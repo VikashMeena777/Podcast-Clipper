@@ -46,7 +46,8 @@ def download_youtube(url: str, output_path: str) -> str:
     cmd = [
         'yt-dlp',
         '--js-runtimes', 'deno',
-        '-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
+        '--remote-components', 'ejs:github',
+        '-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
         '--merge-output-format', 'mp4',
         '-o', output_path,
     ]
