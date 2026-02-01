@@ -30,12 +30,12 @@ jobs:
       
       - name: Setup YouTube cookies
         run: |
-          # Create cookies file from secret if provided
+          # Write cookies directly (not base64)
           if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
-            echo "${{ secrets.YOUTUBE_COOKIES }}" | base64 -d > cookies.txt
+            echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
             echo "YouTube cookies configured"
           else
-            echo "No YouTube cookies configured - may fail on age-restricted/bot-detected videos"
+            echo "No YouTube cookies configured"
           fi
       
       - name: Setup rclone
