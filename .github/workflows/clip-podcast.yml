@@ -17,11 +17,26 @@ jobs:
         with:
           python-version: '3.11'
       
+      - name: Setup Deno (for yt-dlp)
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      
       - name: Install dependencies
         run: |
           pip install yt-dlp requests
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+      
+      - name: Setup YouTube cookies
+        run: |
+          # Create cookies file from secret if provided
+          if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
+            echo "${{ secrets.YOUTUBE_COOKIES }}" | base64 -d > cookies.txt
+            echo "YouTube cookies configured"
+          else
+            echo "No YouTube cookies configured - may fail on age-restricted/bot-detected videos"
+          fi
       
       - name: Setup rclone
         run: |
@@ -34,6 +49,7 @@ jobs:
         id: process
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          YOUTUBE_COOKIES_FILE: ${{ secrets.YOUTUBE_COOKIES && 'cookies.txt' || '' }}
         run: |
           python clip_podcast.py --payload '${{ toJson(github.event.client_payload) }}'
       
