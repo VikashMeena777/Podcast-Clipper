@@ -27,7 +27,7 @@ GROQ_API_URL = "https://api.groq.com/openai/v1"
 
 # Processing config
 MAX_CLIP_DURATION = 60
-MIN_CLIP_DURATION = 20
+MIN_CLIP_DURATION = 30  # Minimum 30 seconds for better context
 NUM_CLIPS = 10
 WHISPER_MODEL = "whisper-large-v3"
 LLM_MODEL = "llama-3.3-70b-versatile"
@@ -357,7 +357,7 @@ CONTENT TYPES (pick best fit):
 - "humor" - Genuinely funny moment
 
 CRITICAL RULES:
-- Each segment MUST be 25-55 seconds (not too short, not too long)
+- Each segment MUST be 30-60 seconds (not too short, not too long)
 - Start time should begin BEFORE the speaker starts the thought (1-2s buffer)
 - End time should be AFTER they finish the point (natural ending)
 - NEVER pick mid-sentence clips or interrupted thoughts
@@ -367,7 +367,7 @@ CRITICAL RULES:
 For each segment return:
 - start_time: float (convert [MM:SS] to seconds)
 - end_time: float (seconds)
-- duration: 25-55 seconds
+- duration: 30-60 seconds
 - viral_score: total out of 50
 - type: "insight" | "story" | "opinion" | "motivation" | "humor"
 - hook_line: The exact opening line that grabs attention
@@ -443,12 +443,13 @@ def cut_clip(video_path: str, start: float, duration: float, output_path: str) -
 
 
 def generate_ass_subtitles(segments: List[Dict], clip_start: float, clip_duration: float, output_path: str):
-    """Generate ASS subtitles from transcript segments with Hindi font support."""
+    """Generate ASS subtitles with word-by-word display (2-3 words at a time)."""
     
-    # Use Noto Sans for Hindi/Hinglish - available on most systems
-    # Fallback fonts that support Devanagari
+    # Use Noto Sans for Hindi/Hinglish support
     font_name = "Noto Sans Devanagari"
+    font_size = 72  # Larger font for mobile viewing
     
+    # ASS header with larger font, thicker outline, centered at bottom
     ass_content = f"""[Script Info]
 Title: Podcast Clip Subtitles
 ScriptType: v4.00+
@@ -458,13 +459,16 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},52,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,50,50,180,1
+Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,3,2,80,80,120,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     
     clip_end = clip_start + clip_duration
+    
+    # Collect all words with their timestamps
+    all_words = []
     
     for seg in segments:
         seg_start = seg.get('start', 0)
@@ -478,9 +482,42 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if seg_end < clip_start or seg_start > clip_end:
             continue
         
+        # Split segment text into words
+        words = text.split()
+        if not words:
+            continue
+        
+        # Calculate time per word in this segment
+        seg_duration = seg_end - seg_start
+        time_per_word = seg_duration / len(words) if words else 0
+        
+        for i, word in enumerate(words):
+            word_start = seg_start + (i * time_per_word)
+            word_end = seg_start + ((i + 1) * time_per_word)
+            
+            # Only include words within clip bounds
+            if word_end >= clip_start and word_start <= clip_end:
+                all_words.append({
+                    'text': word,
+                    'start': word_start,
+                    'end': word_end
+                })
+    
+    # Group words into chunks of 2-3 words
+    words_per_chunk = 3
+    
+    for i in range(0, len(all_words), words_per_chunk):
+        chunk = all_words[i:i + words_per_chunk]
+        if not chunk:
+            continue
+        
+        # Get timing for this chunk
+        chunk_start = chunk[0]['start']
+        chunk_end = chunk[-1]['end']
+        
         # Adjust times relative to clip start
-        rel_start = max(0, seg_start - clip_start)
-        rel_end = min(clip_duration, seg_end - clip_start)
+        rel_start = max(0, chunk_start - clip_start)
+        rel_end = min(clip_duration, chunk_end - clip_start)
         
         if rel_end <= rel_start:
             continue
@@ -489,15 +526,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         start_str = format_ass_time(rel_start)
         end_str = format_ass_time(rel_end)
         
-        # Clean text - remove problematic characters but keep Hindi
-        clean_text = text.replace('\\', '').replace('{', '').replace('}', '')
-        clean_text = clean_text.replace('\n', ' ').strip()
-        
-        # Split long lines
-        if len(clean_text) > 40:
-            words = clean_text.split()
-            mid = len(words) // 2
-            clean_text = ' '.join(words[:mid]) + '\\N' + ' '.join(words[mid:])
+        # Combine words and clean text
+        chunk_text = ' '.join(w['text'] for w in chunk)
+        clean_text = chunk_text.replace('\\', '').replace('{', '').replace('}', '')
+        clean_text = clean_text.replace('\n', ' ').strip().upper()
         
         ass_content += f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{clean_text}\n"
     
