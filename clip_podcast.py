@@ -339,46 +339,54 @@ async def analyze_transcript_chunk(transcript: str) -> List[Dict]:
 
 Analyze this podcast transcript and find the TOP 5 most viral-worthy segments.
 
-TRANSCRIPT (with timestamps):
+TRANSCRIPT (with timestamps in [MM:SS] format):
 {transcript}
 
-SCORING CRITERIA (rate each 1-10):
-1. **Shock Value** - Unexpected revelation, controversial take, or surprising fact
-2. **Humor** - Genuinely funny moment, witty comeback, or comedic timing
-3. **Strong Opinion** - Bold claim, hot take, or passionate argument
-4. **Emotional Peak** - Inspiring story, vulnerable moment, or intense emotion
-5. **Quotability** - Memorable phrase that people will share
+WHAT MAKES A CLIP VIRAL (score 1-10 each):
+1. **SELF-CONTAINED** - The clip MUST make sense without any prior context. Viewer should understand it immediately.
+2. **STRONG HOOK** - Opens with something attention-grabbing in first 3 seconds
+3. **EMOTIONAL PEAK** - Contains a powerful emotion (surprise, inspiration, humor, controversy)
+4. **COMPLETE THOUGHT** - Has a clear beginning, point, and conclusion within the clip
+5. **QUOTABLE** - Contains a memorable phrase or statement worth sharing
 
-For each segment found, return:
-- start_time: float (seconds) - extract from timestamp
-- end_time: float (seconds) - should be 20-60 seconds after start
-- duration: 20-60 seconds only
+CONTENT TYPES (pick best fit):
+- "insight" - Valuable knowledge or life lesson
+- "story" - Personal anecdote with a punchline
+- "opinion" - Bold take or controversial statement  
+- "motivation" - Inspiring or empowering message
+- "humor" - Genuinely funny moment
+
+CRITICAL RULES:
+- Each segment MUST be 25-55 seconds (not too short, not too long)
+- Start time should begin BEFORE the speaker starts the thought (1-2s buffer)
+- End time should be AFTER they finish the point (natural ending)
+- NEVER pick mid-sentence clips or interrupted thoughts
+- AVOID clips that say "like I mentioned earlier" or reference previous content
+- Prefer clips where speaker is passionate/animated
+
+For each segment return:
+- start_time: float (convert [MM:SS] to seconds)
+- end_time: float (seconds)
+- duration: 25-55 seconds
 - viral_score: total out of 50
-- type: "humor" | "shock" | "opinion" | "emotional" | "quotable"
-- hook_line: First sentence that grabs attention
-- context: Why this segment is viral-worthy
+- type: "insight" | "story" | "opinion" | "motivation" | "humor"
+- hook_line: The exact opening line that grabs attention
+- context: 1 sentence why this will go viral
 
-OUTPUT FORMAT (JSON only, no markdown):
+OUTPUT FORMAT (JSON only):
 {{"segments": [
   {{
-    "start_time": 125.5,
-    "end_time": 165.2,
-    "duration": 39.7,
+    "start_time": 125.0,
+    "end_time": 165.0,
+    "duration": 40,
     "viral_score": 42,
-    "type": "shock",
-    "hook_line": "Wait, he actually said that?",
-    "context": "Guest reveals controversial industry secret"
+    "type": "insight",
+    "hook_line": "Most people don't realize this but...",
+    "context": "Reveals surprising truth about success that challenges common belief"
   }}
 ]}}
 
-RULES:
-- Each segment MUST be 20-60 seconds
-- Leave 2-second padding at start/end
-- Avoid segments that need context from earlier
-- Order by viral_score descending (highest first)
-- Return exactly 5 segments
-
-Return ONLY the JSON, no other text."""
+Return ONLY JSON, no markdown or explanation."""
 
     url = f"{GROQ_API_URL}/chat/completions"
     
@@ -409,40 +417,37 @@ Return ONLY the JSON, no other text."""
 
 
 def cut_clip(video_path: str, start: float, duration: float, output_path: str) -> str:
-    """Cut a clip from the video."""
+    """Cut a clip from the video with proper sync."""
+    # Put -ss AFTER -i for accurate seeking (slower but synced)
+    # Add small buffer before and after
+    actual_start = max(0, start - 0.5)
+    actual_duration = duration + 1
+    
     cmd = [
         'ffmpeg', '-y',
-        '-ss', str(max(0, start - 1)),  # 1s before for safety
         '-i', video_path,
-        '-t', str(duration + 2),  # 2s buffer
-        '-c', 'copy',
+        '-ss', str(actual_start),
+        '-t', str(actual_duration),
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+        '-c:a', 'aac', '-b:a', '192k',
+        '-avoid_negative_ts', 'make_zero',
         output_path
     ]
     
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        # Try with re-encoding if stream copy fails
-        cmd = [
-            'ffmpeg', '-y',
-            '-ss', str(max(0, start - 1)),
-            '-i', video_path,
-            '-t', str(duration + 2),
-            '-c:v', 'libx264', '-preset', 'fast',
-            '-c:a', 'aac',
-            output_path
-        ]
-        subprocess.run(cmd, capture_output=True, text=True)
+        print(f"    FFmpeg cut error: {result.stderr[:200]}")
+        raise RuntimeError(f"Failed to cut clip: {result.stderr}")
     
     return output_path
 
 
-def generate_ass_subtitles(text: str, duration: float, output_path: str):
-    """Generate ASS subtitles with word-by-word animation."""
+def generate_ass_subtitles(segments: List[Dict], clip_start: float, clip_duration: float, output_path: str):
+    """Generate ASS subtitles from transcript segments with Hindi font support."""
     
-    # Split into words
-    words = text.split()
-    words_per_line = 5
-    time_per_word = duration / len(words) if words else 1
+    # Use Noto Sans for Hindi/Hinglish - available on most systems
+    # Fallback fonts that support Devanagari
+    font_name = "Noto Sans Devanagari"
     
     ass_content = f"""[Script Info]
 Title: Podcast Clip Subtitles
@@ -453,31 +458,48 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{SUBTITLE_FONT},{SUBTITLE_FONTSIZE},{SUBTITLE_COLOR},&H000000FF,{SUBTITLE_OUTLINE},&H00000000,-1,0,0,0,100,100,0,0,1,4,0,2,50,50,200,1
+Style: Default,{font_name},52,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,50,50,180,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     
-    current_time = 0.5  # Start 0.5s in
+    clip_end = clip_start + clip_duration
     
-    for i in range(0, len(words), words_per_line):
-        chunk = words[i:i + words_per_line]
-        chunk_text = ' '.join(chunk).upper()
+    for seg in segments:
+        seg_start = seg.get('start', 0)
+        seg_end = seg.get('end', 0)
+        text = seg.get('text', '').strip()
         
-        start_time = current_time
-        end_time = current_time + (time_per_word * len(chunk))
+        if not text:
+            continue
         
-        # Format times
-        start_str = format_ass_time(start_time)
-        end_str = format_ass_time(end_time)
+        # Check if segment overlaps with clip
+        if seg_end < clip_start or seg_start > clip_end:
+            continue
         
-        # Clean text for ASS
-        clean_text = chunk_text.replace('\\', '').replace('{', '').replace('}', '')
+        # Adjust times relative to clip start
+        rel_start = max(0, seg_start - clip_start)
+        rel_end = min(clip_duration, seg_end - clip_start)
+        
+        if rel_end <= rel_start:
+            continue
+        
+        # Format times for ASS
+        start_str = format_ass_time(rel_start)
+        end_str = format_ass_time(rel_end)
+        
+        # Clean text - remove problematic characters but keep Hindi
+        clean_text = text.replace('\\', '').replace('{', '').replace('}', '')
+        clean_text = clean_text.replace('\n', ' ').strip()
+        
+        # Split long lines
+        if len(clean_text) > 40:
+            words = clean_text.split()
+            mid = len(words) // 2
+            clean_text = ' '.join(words[:mid]) + '\\N' + ' '.join(words[mid:])
         
         ass_content += f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{clean_text}\n"
-        
-        current_time = end_time
     
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(ass_content)
@@ -493,20 +515,39 @@ def format_ass_time(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{secs:05.2f}"
 
 
-def add_subtitles_and_crop(clip_path: str, subtitle_path: str, output_path: str) -> str:
-    """Add subtitles and crop to 9:16 vertical format."""
-    print(f"    Adding subtitles + vertical crop...")
+def add_subtitles_and_blur_background(clip_path: str, subtitle_path: str, output_path: str) -> str:
+    """Add subtitles and create 9:16 with blurred background (full video, not cropped)."""
+    print(f"    Adding subtitles + blurred background...")
     
-    # Escape subtitle path for FFmpeg
+    # Escape subtitle path for FFmpeg filter
     sub_path_escaped = subtitle_path.replace('\\', '/').replace(':', '\\:')
+    
+    # Complex filter for blurred background effect:
+    # 1. Scale original to fit 9:16 (with letterboxing to keep aspect)
+    # 2. Create blurred background from same video scaled to fill
+    # 3. Overlay original on top of blurred background
+    # 4. Add subtitles
+    
+    filter_complex = (
+        # Background: scale to fill 1080x1920 and blur heavily
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:5[bg];"
+        # Foreground: scale to fit within 1080x1920 keeping aspect ratio
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+        # Overlay foreground on blurred background (centered)
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[video];"
+        # Add subtitles
+        f"[video]ass='{sub_path_escaped}'[out]"
+    )
     
     cmd = [
         'ffmpeg', '-y',
         '-i', clip_path,
-        '-vf', f"crop=ih*9/16:ih,scale=1080:1920,ass='{sub_path_escaped}'",
+        '-filter_complex', filter_complex,
+        '-map', '[out]',
+        '-map', '0:a',
         '-c:v', 'libx264',
         '-preset', 'fast',
-        '-crf', '23',
+        '-crf', '22',
         '-c:a', 'aac',
         '-b:a', '192k',
         '-movflags', '+faststart',
@@ -515,13 +556,23 @@ def add_subtitles_and_crop(clip_path: str, subtitle_path: str, output_path: str)
     
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"    FFmpeg warning: {result.stderr[:200]}")
-        # Try without subtitles if ASS fails
+        print(f"    FFmpeg error with subtitles, trying without...")
+        print(f"    Error: {result.stderr[:300]}")
+        
+        # Fallback: without subtitles
+        filter_complex_no_sub = (
+            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:5[bg];"
+            "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2[out]"
+        )
+        
         cmd = [
             'ffmpeg', '-y',
             '-i', clip_path,
-            '-vf', "crop=ih*9/16:ih,scale=1080:1920",
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+            '-filter_complex', filter_complex_no_sub,
+            '-map', '[out]',
+            '-map', '0:a',
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
             '-c:a', 'aac', '-b:a', '192k',
             '-movflags', '+faststart',
             output_path
@@ -641,6 +692,9 @@ async def process_podcast(podcast_url: str, podcast_title: str, language: str = 
         # 4. Find viral segments
         segments = await find_viral_segments(transcript)
         
+        # Get raw segments from whisper for subtitles
+        whisper_segments = whisper_result.get('segments', [])
+        
         if not segments:
             raise RuntimeError("No viral segments found!")
         
@@ -659,14 +713,13 @@ async def process_podcast(podcast_url: str, podcast_title: str, language: str = 
             raw_clip_path = str(temp_path / f"raw_clip_{clip_num:02d}.mp4")
             cut_clip(video_path, start, duration, raw_clip_path)
             
-            # Generate subtitles
+            # Generate subtitles from actual transcript segments (not just hook_line)
             subtitle_path = str(temp_path / f"subtitles_{clip_num:02d}.ass")
-            hook_text = segment.get('hook_line', 'Watch this!')
-            generate_ass_subtitles(hook_text, duration, subtitle_path)
+            generate_ass_subtitles(whisper_segments, start, duration, subtitle_path)
             
-            # Add subtitles and crop
+            # Add subtitles and blurred background
             final_clip_path = str(temp_path / f"clip_{clip_num:02d}_final.mp4")
-            add_subtitles_and_crop(raw_clip_path, subtitle_path, final_clip_path)
+            add_subtitles_and_blur_background(raw_clip_path, subtitle_path, final_clip_path)
             
             # Generate metadata
             print(f"    Generating metadata...")
