@@ -26,8 +26,8 @@ GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
 GROQ_API_URL = "https://api.groq.com/openai/v1"
 
 # Processing config
-MAX_CLIP_DURATION = 60
-MIN_CLIP_DURATION = 30  # Minimum 30 seconds for better context
+MAX_CLIP_DURATION = 90  # Flexible - up to 90 seconds based on context
+MIN_CLIP_DURATION = 30  # Minimum 30 seconds for context
 NUM_CLIPS = 10
 WHISPER_MODEL = "whisper-large-v3"
 LLM_MODEL = "llama-3.3-70b-versatile"
@@ -373,7 +373,11 @@ CONTENT TYPES:
 - "motivation" - Empowering message
 - "humor" - Genuinely funny standalone moment
 
-DURATION: 30-60 seconds (sweet spot: 45 seconds)
+DURATION: FLEXIBLE based on content!
+- Minimum: 30 seconds (enough for context)
+- Maximum: 90 seconds (for complete stories)
+- Let the CONTENT dictate the length - include the FULL thought/story
+- Don't force a fixed length - end when the point is complete
 
 OUTPUT (JSON only):
 {{"segments": [
