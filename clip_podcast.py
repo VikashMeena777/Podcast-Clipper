@@ -123,30 +123,26 @@ async def transcribe_local_whisper(audio_path: str, language: str = "hi") -> Dic
     except ImportError:
         raise RuntimeError("faster-whisper not installed")
     
-    # Use base model for speed on GitHub Actions (no GPU) - balances speed and accuracy
-    model = WhisperModel("base", device="cpu", compute_type="int8")
+    # Use small model for speed on GitHub Actions (no GPU) - this works!
+    model = WhisperModel("small", device="cpu", compute_type="int8")
     
     segments_list = []
     full_text = []
     
     # Auto-detect language for bilingual podcasts (Hindi+English)
+    # Use None for auto-detect, this handles mixed language content better
     detect_lang = None if language in ['auto', 'mixed'] else language
     
-    # Transcribe with VAD filter for better segment detection
-    print(f"  Transcribing (this may take a while for long podcasts)...")
+    # Transcribe - keep word_timestamps=False for proper segment count!
     segments, info = model.transcribe(
         audio_path,
-        language=detect_lang,
+        language=detect_lang,  # Supports auto-detect
         beam_size=5,
-        word_timestamps=True,
-        vad_filter=True,  # Voice Activity Detection for cleaner segments
-        vad_parameters=dict(min_silence_duration_ms=500)  # Split on 500ms silence
+        word_timestamps=False  # Keep False - True breaks segment count!
     )
     
     print(f"  Detected language: {info.language} (probability: {info.language_probability:.2f})")
     
-    # Force iteration to complete (generator is lazy)
-    segment_count = 0
     for segment in segments:
         segments_list.append({
             'start': segment.start,
@@ -154,11 +150,6 @@ async def transcribe_local_whisper(audio_path: str, language: str = "hi") -> Dic
             'text': segment.text.strip()
         })
         full_text.append(segment.text.strip())
-        segment_count += 1
-        
-        # Progress update every 500 segments
-        if segment_count % 500 == 0:
-            print(f"    Processed {segment_count} segments...")
     
     print(f"  Transcribed: {len(segments_list)} segments (local)")
     
@@ -344,12 +335,30 @@ async def find_viral_segments_chunked(transcript: str, chunk_size: int, target_c
     
     for i, chunk in enumerate(chunks):
         print(f"  Analyzing chunk {i+1}/{len(chunks)}...")
-        try:
-            chunk_segments = await analyze_transcript_chunk(chunk)
-            all_segments.extend(chunk_segments)
-        except Exception as e:
-            print(f"    Chunk {i+1} failed: {e}")
-            continue
+        
+        # Retry logic for rate limits (429 errors)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                chunk_segments = await analyze_transcript_chunk(chunk)
+                all_segments.extend(chunk_segments)
+                break  # Success, move to next chunk
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str and attempt < max_retries - 1:
+                    wait_time = 30 * (attempt + 1)  # 30s, 60s, 90s
+                    print(f"    Rate limited, waiting {wait_time}s before retry...")
+                    import time
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print(f"    Chunk {i+1} failed: {e}")
+                    break
+        
+        # Small delay between chunks to avoid rate limits
+        if i < len(chunks) - 1:
+            import time
+            time.sleep(3)  # 3 second delay between chunks
     
     # Sort by viral score and return top clips
     all_segments.sort(key=lambda x: x.get('viral_score', 0), reverse=True)
@@ -609,8 +618,9 @@ def add_subtitles_and_blur_background(clip_path: str, subtitle_path: str, output
         "[bg][fg]overlay=(W-w)/2:(H-h)/2[video1];"
         # Add subtitles
         f"[video1]ass='{sub_path_escaped}'[video2];"
-        # Add progress bar at top (white bar, 8px height)
-        f"[video2]drawbox=x=0:y=0:w='(t/{duration})*iw':h=8:color=white@0.9:t=fill[video3];"
+        # Add animated progress bar at top using drawbox with expression
+        # The trick: use 'w' expression that evaluates per frame
+        f"[video2]drawbox=x=0:y=0:w=iw*t/{duration}:h=8:color=white@0.9:t=fill[video3];"
         # Add CTA text in last 3 seconds
         f"[video3]drawtext=text='{cta_text}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
         f"fontsize=48:fontcolor=white:borderw=3:bordercolor=black:"
@@ -642,8 +652,8 @@ def add_subtitles_and_blur_background(clip_path: str, subtitle_path: str, output
             "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:5[bg];"
             "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
             "[bg][fg]overlay=(W-w)/2:(H-h)/2[video1];"
-            # Progress bar at top
-            f"[video1]drawbox=x=0:y=0:w='(t/{duration})*iw':h=8:color=white@0.9:t=fill[video2];"
+            # Progress bar at top (animated)
+            f"[video1]drawbox=x=0:y=0:w=iw*t/{duration}:h=8:color=white@0.9:t=fill[video2];"
             # CTA text
             f"[video2]drawtext=text='{cta_text}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
             f"fontsize=48:fontcolor=white:borderw=3:bordercolor=black:"
