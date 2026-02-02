@@ -335,58 +335,60 @@ async def find_viral_segments_chunked(transcript: str, chunk_size: int) -> List[
 async def analyze_transcript_chunk(transcript: str) -> List[Dict]:
     """Analyze a single transcript chunk for viral segments."""
     
-    prompt = f"""You are a viral content expert specializing in podcast clips for TikTok/Reels/Shorts.
+    prompt = f"""You are a viral content expert. Find clips that will BLOW UP on TikTok/Reels/Shorts.
 
-Analyze this podcast transcript and find the TOP 5 most viral-worthy segments.
-
-TRANSCRIPT (with timestamps in [MM:SS] format):
+TRANSCRIPT:
 {transcript}
 
-WHAT MAKES A CLIP VIRAL (score 1-10 each):
-1. **SELF-CONTAINED** - The clip MUST make sense without any prior context. Viewer should understand it immediately.
-2. **STRONG HOOK** - Opens with something attention-grabbing in first 3 seconds
-3. **EMOTIONAL PEAK** - Contains a powerful emotion (surprise, inspiration, humor, controversy)
-4. **COMPLETE THOUGHT** - Has a clear beginning, point, and conclusion within the clip
-5. **QUOTABLE** - Contains a memorable phrase or statement worth sharing
+⚠️ STRICT REQUIREMENTS - A good clip MUST have ALL of these:
 
-CONTENT TYPES (pick best fit):
-- "insight" - Valuable knowledge or life lesson
-- "story" - Personal anecdote with a punchline
-- "opinion" - Bold take or controversial statement  
-- "motivation" - Inspiring or empowering message
-- "humor" - Genuinely funny moment
+1. **STANDALONE** - A random viewer with ZERO context must understand 100% of what's being said. 
+   - ❌ REJECT: "As I was saying...", "Like I mentioned...", "So yeah, that's why..."
+   - ❌ REJECT: References to earlier topics, people not introduced, inside jokes
+   - ✅ ACCEPT: Complete story with beginning/middle/end, universal truth, standalone advice
 
-CRITICAL RULES:
-- Each segment MUST be 30-60 seconds (not too short, not too long)
-- Start time should begin BEFORE the speaker starts the thought (1-2s buffer)
-- End time should be AFTER they finish the point (natural ending)
-- NEVER pick mid-sentence clips or interrupted thoughts
-- AVOID clips that say "like I mentioned earlier" or reference previous content
-- Prefer clips where speaker is passionate/animated
+2. **STRONG OPENING** - First 3 seconds must HOOK the viewer:
+   - ✅ "Here's what nobody tells you about..."
+   - ✅ "The biggest mistake people make is..."
+   - ✅ "I'm going to share something that changed my life..."
+   - ❌ "...and so then I..." (mid-sentence start)
 
-For each segment return:
-- start_time: float (convert [MM:SS] to seconds)
-- end_time: float (seconds)
-- duration: 30-60 seconds
-- viral_score: total out of 50
-- type: "insight" | "story" | "opinion" | "motivation" | "humor"
-- hook_line: The exact opening line that grabs attention
-- context: 1 sentence why this will go viral
+3. **COMPLETE THOUGHT** - The clip must have a SATISFYING ENDING:
+   - ✅ Story has punchline/conclusion
+   - ✅ Advice is fully explained
+   - ❌ Gets cut off mid-point
+   - ❌ Ends with "so..." or trails off
 
-OUTPUT FORMAT (JSON only):
+4. **EMOTIONAL PUNCH** - Must trigger strong reaction:
+   - Surprising revelation
+   - Controversial opinion  
+   - Inspiring story
+   - Funny moment
+   - Mind-blowing fact
+
+CONTENT TYPES:
+- "insight" - Universal wisdom anyone can apply
+- "story" - Complete anecdote with clear lesson
+- "opinion" - Bold, debatable take
+- "motivation" - Empowering message
+- "humor" - Genuinely funny standalone moment
+
+DURATION: 30-60 seconds (sweet spot: 45 seconds)
+
+OUTPUT (JSON only):
 {{"segments": [
   {{
     "start_time": 125.0,
-    "end_time": 165.0,
-    "duration": 40,
+    "end_time": 170.0,
+    "duration": 45,
     "viral_score": 42,
     "type": "insight",
-    "hook_line": "Most people don't realize this but...",
-    "context": "Reveals surprising truth about success that challenges common belief"
+    "hook_line": "Here's what nobody tells you about success...",
+    "context": "Universal advice about mindset that anyone can apply"
   }}
 ]}}
 
-Return ONLY JSON, no markdown or explanation."""
+Find TOP 5 clips. Return ONLY valid JSON."""
 
     url = f"{GROQ_API_URL}/chat/completions"
     
