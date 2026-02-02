@@ -28,7 +28,8 @@ GROQ_API_URL = "https://api.groq.com/openai/v1"
 # Processing config
 MAX_CLIP_DURATION = 90  # Flexible - up to 90 seconds based on context
 MIN_CLIP_DURATION = 30  # Minimum 30 seconds for context
-NUM_CLIPS = 10
+MIN_CLIPS = 4  # Minimum clips to generate
+CLIPS_PER_15_MIN = 3  # Generate ~3 clips per 15 minutes of podcast
 WHISPER_MODEL = "whisper-large-v3"
 LLM_MODEL = "llama-3.3-70b-versatile"
 
@@ -122,20 +123,30 @@ async def transcribe_local_whisper(audio_path: str, language: str = "hi") -> Dic
     except ImportError:
         raise RuntimeError("faster-whisper not installed")
     
-    # Use small model for speed on GitHub Actions (no GPU)
-    model = WhisperModel("small", device="cpu", compute_type="int8")
+    # Use base model for speed on GitHub Actions (no GPU) - balances speed and accuracy
+    model = WhisperModel("base", device="cpu", compute_type="int8")
     
     segments_list = []
     full_text = []
     
-    # Transcribe
+    # Auto-detect language for bilingual podcasts (Hindi+English)
+    detect_lang = None if language in ['auto', 'mixed'] else language
+    
+    # Transcribe with VAD filter for better segment detection
+    print(f"  Transcribing (this may take a while for long podcasts)...")
     segments, info = model.transcribe(
         audio_path,
-        language=language,
+        language=detect_lang,
         beam_size=5,
-        word_timestamps=False
+        word_timestamps=True,
+        vad_filter=True,  # Voice Activity Detection for cleaner segments
+        vad_parameters=dict(min_silence_duration_ms=500)  # Split on 500ms silence
     )
     
+    print(f"  Detected language: {info.language} (probability: {info.language_probability:.2f})")
+    
+    # Force iteration to complete (generator is lazy)
+    segment_count = 0
     for segment in segments:
         segments_list.append({
             'start': segment.start,
@@ -143,6 +154,11 @@ async def transcribe_local_whisper(audio_path: str, language: str = "hi") -> Dic
             'text': segment.text.strip()
         })
         full_text.append(segment.text.strip())
+        segment_count += 1
+        
+        # Progress update every 500 segments
+        if segment_count % 500 == 0:
+            print(f"    Processed {segment_count} segments...")
     
     print(f"  Transcribed: {len(segments_list)} segments (local)")
     
@@ -280,21 +296,31 @@ def format_transcript_with_timestamps(whisper_result: Dict) -> str:
     return "\n".join(lines)
 
 
-async def find_viral_segments(transcript: str) -> List[Dict]:
-    """Use Groq LLaMA to find top 10 viral segments. Handles large transcripts by chunking."""
+async def find_viral_segments(transcript: str, podcast_duration: float = 0) -> List[Dict]:
+    """Use Groq LLaMA to find viral segments. Dynamic count based on podcast length."""
     print(f"[4/7] Analyzing for viral segments...")
+    
+    # Calculate how many clips to generate based on podcast length
+    # ~3 clips per 15 minutes, minimum 4 clips
+    if podcast_duration > 0:
+        target_clips = max(MIN_CLIPS, int((podcast_duration / 60) / 15 * CLIPS_PER_15_MIN))
+    else:
+        target_clips = MIN_CLIPS
+    
+    print(f"  Target clips: {target_clips} (based on {podcast_duration/60:.1f} min podcast)")
     
     # Check transcript size - Groq has token limits, use small chunks for reliability
     MAX_CHUNK_CHARS = 15000  # Small chunks to avoid 413 errors
     
     if len(transcript) > MAX_CHUNK_CHARS:
         print(f"  Transcript too large ({len(transcript)} chars), analyzing in chunks...")
-        return await find_viral_segments_chunked(transcript, MAX_CHUNK_CHARS)
+        return await find_viral_segments_chunked(transcript, MAX_CHUNK_CHARS, target_clips)
     
-    return await analyze_transcript_chunk(transcript)
+    segments = await analyze_transcript_chunk(transcript)
+    return segments[:target_clips]
 
 
-async def find_viral_segments_chunked(transcript: str, chunk_size: int) -> List[Dict]:
+async def find_viral_segments_chunked(transcript: str, chunk_size: int, target_clips: int) -> List[Dict]:
     """Split transcript into chunks and find best segments from each."""
     lines = transcript.split('\n')
     chunks = []
@@ -325,11 +351,11 @@ async def find_viral_segments_chunked(transcript: str, chunk_size: int) -> List[
             print(f"    Chunk {i+1} failed: {e}")
             continue
     
-    # Sort by viral score and return top 10
+    # Sort by viral score and return top clips
     all_segments.sort(key=lambda x: x.get('viral_score', 0), reverse=True)
-    print(f"  Found {len(all_segments)} total segments, selecting top 10")
+    print(f"  Found {len(all_segments)} total segments, selecting top {target_clips}")
     
-    return all_segments[:NUM_CLIPS]
+    return all_segments[:target_clips]
 
 
 async def analyze_transcript_chunk(transcript: str) -> List[Dict]:
@@ -558,28 +584,37 @@ def format_ass_time(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{secs:05.2f}"
 
 
-def add_subtitles_and_blur_background(clip_path: str, subtitle_path: str, output_path: str) -> str:
-    """Add subtitles and create 9:16 with blurred background (full video, not cropped)."""
-    print(f"    Adding subtitles + blurred background...")
+def add_subtitles_and_blur_background(clip_path: str, subtitle_path: str, output_path: str, duration: float = 60) -> str:
+    """Add subtitles, progress bar, CTA, and create 9:16 with blurred background."""
+    print(f"    Adding subtitles + progress bar + CTA...")
     
     # Escape subtitle path for FFmpeg filter
     sub_path_escaped = subtitle_path.replace('\\', '/').replace(':', '\\:')
     
-    # Complex filter for blurred background effect:
-    # 1. Scale original to fit 9:16 (with letterboxing to keep aspect)
-    # 2. Create blurred background from same video scaled to fill
-    # 3. Overlay original on top of blurred background
-    # 4. Add subtitles
+    # Complex filter:
+    # 1. Blurred background
+    # 2. Overlay foreground
+    # 3. Add subtitles
+    # 4. Add progress bar at top
+    # 5. Add CTA at end (last 3 seconds)
+    
+    cta_text = "Follow for more!"
     
     filter_complex = (
-        # Background: scale to fill 1080x1920 and blur heavily
+        # Background: scale to fill and blur
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:5[bg];"
-        # Foreground: scale to fit within 1080x1920 keeping aspect ratio
+        # Foreground: scale to fit
         "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-        # Overlay foreground on blurred background (centered)
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2[video];"
+        # Overlay foreground on background
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[video1];"
         # Add subtitles
-        f"[video]ass='{sub_path_escaped}'[out]"
+        f"[video1]ass='{sub_path_escaped}'[video2];"
+        # Add progress bar at top (white bar, 8px height)
+        f"[video2]drawbox=x=0:y=0:w='(t/{duration})*iw':h=8:color=white@0.9:t=fill[video3];"
+        # Add CTA text in last 3 seconds
+        f"[video3]drawtext=text='{cta_text}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
+        f"fontsize=48:fontcolor=white:borderw=3:bordercolor=black:"
+        f"x=(w-text_w)/2:y=h-150:enable='gte(t,{duration-3})'[out]"
     )
     
     cmd = [
@@ -602,11 +637,17 @@ def add_subtitles_and_blur_background(clip_path: str, subtitle_path: str, output
         print(f"    FFmpeg error with subtitles, trying without...")
         print(f"    Error: {result.stderr[:300]}")
         
-        # Fallback: without subtitles
+        # Fallback: without subtitles but keep progress bar and CTA
         filter_complex_no_sub = (
             "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:5[bg];"
             "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-            "[bg][fg]overlay=(W-w)/2:(H-h)/2[out]"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2[video1];"
+            # Progress bar at top
+            f"[video1]drawbox=x=0:y=0:w='(t/{duration})*iw':h=8:color=white@0.9:t=fill[video2];"
+            # CTA text
+            f"[video2]drawtext=text='{cta_text}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
+            f"fontsize=48:fontcolor=white:borderw=3:bordercolor=black:"
+            f"x=(w-text_w)/2:y=h-150:enable='gte(t,{duration-3})'[out]"
         )
         
         cmd = [
@@ -724,6 +765,13 @@ async def process_podcast(podcast_url: str, podcast_title: str, language: str = 
         audio_path = str(temp_path / "audio.mp3")
         extract_audio(video_path, audio_path)
         
+        # Get podcast duration for dynamic clip count
+        duration_cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                        '-of', 'default=noprint_wrappers=1:nokey=1', video_path]
+        duration_result = subprocess.run(duration_cmd, capture_output=True, text=True)
+        podcast_duration = float(duration_result.stdout.strip()) if duration_result.stdout.strip() else 0
+        print(f"  Podcast duration: {podcast_duration/60:.1f} minutes")
+        
         # 3. Transcribe
         whisper_result = await transcribe_audio(audio_path, language)
         transcript = format_transcript_with_timestamps(whisper_result)
@@ -732,8 +780,8 @@ async def process_podcast(podcast_url: str, podcast_title: str, language: str = 
         with open(str(temp_path / "transcript.txt"), 'w', encoding='utf-8') as f:
             f.write(transcript)
         
-        # 4. Find viral segments
-        segments = await find_viral_segments(transcript)
+        # 4. Find viral segments (dynamic count based on podcast length)
+        segments = await find_viral_segments(transcript, podcast_duration)
         
         # Get raw segments from whisper for subtitles
         whisper_segments = whisper_result.get('segments', [])
@@ -760,9 +808,9 @@ async def process_podcast(podcast_url: str, podcast_title: str, language: str = 
             subtitle_path = str(temp_path / f"subtitles_{clip_num:02d}.ass")
             generate_ass_subtitles(whisper_segments, start, duration, subtitle_path)
             
-            # Add subtitles and blurred background
+            # Add subtitles, progress bar, and CTA
             final_clip_path = str(temp_path / f"clip_{clip_num:02d}_final.mp4")
-            add_subtitles_and_blur_background(raw_clip_path, subtitle_path, final_clip_path)
+            add_subtitles_and_blur_background(raw_clip_path, subtitle_path, final_clip_path, duration)
             
             # Generate metadata
             print(f"    Generating metadata...")
