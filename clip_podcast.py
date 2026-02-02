@@ -284,8 +284,8 @@ async def find_viral_segments(transcript: str) -> List[Dict]:
     """Use Groq LLaMA to find top 10 viral segments. Handles large transcripts by chunking."""
     print(f"[4/7] Analyzing for viral segments...")
     
-    # Check transcript size - Groq has ~128K token limit, but safer to chunk at ~50K chars
-    MAX_CHUNK_CHARS = 40000
+    # Check transcript size - Groq has token limits, use small chunks for reliability
+    MAX_CHUNK_CHARS = 15000  # Small chunks to avoid 413 errors
     
     if len(transcript) > MAX_CHUNK_CHARS:
         print(f"  Transcript too large ({len(transcript)} chars), analyzing in chunks...")
